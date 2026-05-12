@@ -1,5 +1,8 @@
 use std::{cell::RefCell, rc::Rc};
 use std::ops::{Add, Mul};
+use std::hash::{Hash, Hasher};
+use std::fmt::{self, Debug};
+use std::collections::HashSet;
 
 #[derive(Clone)]
 pub struct Value {
@@ -64,6 +67,81 @@ impl Value {
         let data = if self.data() > 0.0 { self.data() } else { 0.0 };
         Self::from_op(data, vec![self.clone()], Op::Relu)
     }
+
+    fn build_topo(&self, visited: &mut HashSet<Value>, topo: &mut Vec<Value>) {
+        if visited.contains(self) {
+            return;
+        }
+
+        visited.insert(self.clone());
+
+        let prev = self.inner.borrow().prev.clone();
+
+        for parent in prev {
+            parent.build_topo(visited, topo);
+        }
+
+        topo.push(self.clone());
+    }
+
+    pub fn backward(&self) {
+        let mut topo = vec![];
+        let mut visited = HashSet::new();
+    
+        self.build_topo(&mut visited, &mut topo);
+    
+        for value in &topo {
+            value.set_grad(0.0);
+        }
+    
+        self.set_grad(1.0);
+    
+        for value in topo.into_iter().rev() {
+            value._backward();
+        }
+    }
+
+    fn _backward(&self) {
+        let node = self.inner.borrow();
+
+        let op = node.op;
+        let grad = node.grad;
+        let prev = node.prev.clone();
+
+        drop(node);
+
+        match op {
+            Op::Leaf => {}
+
+            Op::Add => {
+                let left = &prev[0];
+                let right = &prev[1];
+
+                left.add_grad(grad);
+                right.add_grad(grad);
+            }
+
+            Op::Mul => {
+                let left = &prev[0];
+                let right = &prev[1];
+
+                let left_data = left.data();
+                let right_data = right.data();
+
+                left.add_grad(right_data * grad);
+                right.add_grad(left_data * grad);
+            }
+
+            Op::Relu => {
+                let input = &prev[0];
+
+                let local_grad = if input.data() > 0.0 { 1.0 } else { 0.0 };
+
+                input.add_grad(local_grad * grad);
+            }
+        }
+    }
+
 }
 
 impl Add for Value {
@@ -85,6 +163,29 @@ impl Mul for Value {
     }
 }
 
+impl Debug for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Value")
+            .field("data", &self.data())
+            .field("grad", &self.grad())
+            .finish()
+    }
+}
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.inner, &other.inner)
+    }
+}
+
+impl Eq for Value {}
+
+impl Hash for Value {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        Rc::as_ptr(&self.inner).hash(state);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,6 +195,14 @@ mod tests {
         let a = Value::new(1.0);
         let b = a.relu();
         assert_eq!(b.data(), 1.0);
+    }
+
+    #[test]
+    fn test_eq() {
+        let a = Value::new(1.0);
+        let b = Value::new(1.0);
+        assert_ne!(a, b);
+        assert_eq!(a, a);
     }
 
     #[test]
@@ -110,5 +219,23 @@ mod tests {
         let b = Value::new(2.0);
         let c = a * b;
         assert_eq!(c.data(), 2.0);
+    }
+
+    #[test]
+    fn polynomial_backward() {
+        let x = Value::new(3.0);
+
+        let y = x.clone() * x.clone()
+            + Value::new(2.0) * x.clone()
+            + Value::new(1.0);
+
+        y.backward();
+
+        assert_eq!(y.data(), 16.0);
+
+        // y = x^2 + 2x + 1
+        // dy/dx = 2x + 2
+        // at x = 3, dy/dx = 8
+        assert_eq!(x.grad(), 8.0);
     }
 }
