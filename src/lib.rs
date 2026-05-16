@@ -1,4 +1,4 @@
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::Cell, rc::Rc};
 use std::ops::{Add, Mul};
 use std::hash::{Hash, Hasher};
 use std::fmt::{self, Debug};
@@ -6,12 +6,12 @@ use std::collections::HashSet;
 
 #[derive(Clone)]
 pub struct Value {
-    inner: Rc<RefCell<Node>>,
+    inner: Rc<Node>,
 }
 
 struct Node {
     data: f64,
-    grad: f64,
+    grad: Cell<f64>,
     prev: Vec<Value>,
     op: Op,
 }
@@ -27,40 +27,40 @@ enum Op {
 impl Value {
     pub fn new(data: f64) -> Self {
         Self {
-            inner: Rc::new(RefCell::new(Node {
+            inner: Rc::new(Node {
                 data,
-                grad: 0.0,
+                grad: Cell::new(0.0),
                 prev: Vec::new(),
                 op: Op::Leaf,
-            })),
+            }),
         }
     }
 
     fn from_op(data: f64, prev: Vec<Value>, op: Op) -> Self {
         Self {
-            inner: Rc::new(RefCell::new(Node {
+            inner: Rc::new(Node {
                 data,
-                grad: 0.0,
+                grad: Cell::new(0.0),
                 prev,
                 op,
-            })),
+            }),
         }
     }
 
     pub fn data(&self) -> f64 {
-        self.inner.borrow().data
+        self.inner.data
     }
 
     pub fn grad(&self) -> f64 {
-        self.inner.borrow().grad
+        self.inner.grad.get()
     }
 
     pub fn set_grad(&self, grad: f64) {
-        self.inner.borrow_mut().grad = grad;
+        self.inner.grad.set(grad);
     }
 
     pub fn add_grad(&self, grad: f64) {
-        self.inner.borrow_mut().grad += grad;
+        self.inner.grad.set(self.inner.grad.get() + grad);
     }
 
     pub fn relu(&self) -> Self {
@@ -75,7 +75,7 @@ impl Value {
 
         visited.insert(self.clone());
 
-        let prev = self.inner.borrow().prev.clone();
+        let prev = self.inner.prev.clone();
 
         for parent in prev {
             parent.build_topo(visited, topo);
@@ -102,13 +102,9 @@ impl Value {
     }
 
     fn _backward(&self) {
-        let node = self.inner.borrow();
-
-        let op = node.op;
-        let grad = node.grad;
-        let prev = node.prev.clone();
-
-        drop(node);
+        let op = self.inner.op;
+        let grad = self.inner.grad.get();
+        let prev = self.inner.prev.clone();
 
         match op {
             Op::Leaf => {}
