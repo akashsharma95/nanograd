@@ -1,5 +1,5 @@
 use std::{cell::Cell, rc::Rc};
-use std::ops::{Add, Mul};
+use std::ops::{Add, Mul, Neg};
 use std::hash::{Hash, Hasher};
 use std::fmt::{self, Debug};
 use std::collections::HashSet;
@@ -159,6 +159,14 @@ impl Mul for Value {
     }
 }
 
+impl Neg for Value {
+    type Output = Value;
+
+    fn neg(self) -> Self::Output {
+       self * Value::new(-1.0)
+    }
+}
+
 impl Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Value")
@@ -180,6 +188,60 @@ impl Hash for Value {
     fn hash<H: Hasher>(&self, state: &mut H) {
         Rc::as_ptr(&self.inner).hash(state);
     }
+}
+
+pub struct Neuron {
+    weights: Vec<Value>,
+    bias: Value,
+    nonlin: bool,
+}
+
+impl Neuron {
+    pub fn new(input_count: usize, seed: usize, nonlin: bool) -> Self {
+        let weights = (0..input_count)
+        .map(|i| Value::new(seeded_weight(seed + i)))
+        .collect();
+
+        let bias = Value::new(0.0);
+
+        Self {
+            weights,
+            bias,
+            nonlin,
+        }
+    }
+
+    pub fn forward(&self, inputs: &[Value]) -> Value {
+        assert_eq!(
+            inputs.len(),
+            self.weights.len(),
+            "number of inputs must match number of weights"
+        );
+
+        let mut out = self.bias.clone();
+
+        // x_i * w_i
+        for (input, weight) in inputs.iter().zip(self.weights.iter()) {
+            out = out + input.clone() * weight.clone();
+        }
+
+        if self.nonlin {
+            out.relu()
+        } else {
+            out
+        }
+    }
+}
+
+fn seeded_weight(seed: usize) -> f64 {
+    let value = seed
+        .wrapping_mul(1_664_525)
+        .wrapping_add(1_013_904_223)
+        % 10_000;
+
+    let normalized = value as f64 / 10_000.0;
+
+    normalized * 2.0 - 1.0
 }
 
 #[cfg(test)]
