@@ -446,4 +446,28 @@ mod tests {
 
         assert_eq!(losses.len(), 3);
     }
+
+    #[test]
+    fn train_predicts_correctly_for_simple_case() {
+        let xs = vec![
+            vec![Value::new(0.0)],
+            vec![Value::new(1.0)],
+            vec![Value::new(2.0)],
+            vec![Value::new(3.0)],
+        ];
+        let ys = vec![
+            vec![Value::new(1.0)],
+            vec![Value::new(3.0)],
+            vec![Value::new(5.0)],
+            vec![Value::new(7.0)],
+        ];
+        let input_batch: Vec<&[Value]> = xs.iter().map(Vec::as_slice).collect();
+        let target_batch: Vec<&[Value]> = ys.iter().map(Vec::as_slice).collect();
+
+        let mlp = MLP::new(1, &[1]);
+        let losses = mlp.train(&input_batch, &target_batch, 0.01, 100);
+
+        assert!(losses.last().unwrap() < losses.first().unwrap());
+        assert!(losses.last().unwrap() < &0.1);
+    }
 }
