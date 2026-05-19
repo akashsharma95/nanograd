@@ -1,8 +1,8 @@
-use std::{cell::Cell, rc::Rc};
-use std::ops::{Add, Mul, Neg};
-use std::hash::{Hash, Hasher};
-use std::fmt::{self, Debug};
 use std::collections::HashSet;
+use std::fmt::{self, Debug};
+use std::hash::{Hash, Hasher};
+use std::ops::{Add, Mul, Neg, Sub};
+use std::{cell::Cell, rc::Rc};
 
 #[derive(Clone)]
 pub struct Value {
@@ -10,7 +10,7 @@ pub struct Value {
 }
 
 struct Node {
-    data: f64,
+    data: Cell<f64>,
     grad: Cell<f64>,
     prev: Vec<Value>,
     op: Op,
@@ -28,7 +28,7 @@ impl Value {
     pub fn new(data: f64) -> Self {
         Self {
             inner: Rc::new(Node {
-                data,
+                data: Cell::new(data),
                 grad: Cell::new(0.0),
                 prev: Vec::new(),
                 op: Op::Leaf,
@@ -39,7 +39,7 @@ impl Value {
     fn from_op(data: f64, prev: Vec<Value>, op: Op) -> Self {
         Self {
             inner: Rc::new(Node {
-                data,
+                data: Cell::new(data),
                 grad: Cell::new(0.0),
                 prev,
                 op,
@@ -48,7 +48,11 @@ impl Value {
     }
 
     pub fn data(&self) -> f64 {
-        self.inner.data
+        self.inner.data.get()
+    }
+
+    pub fn set_data(&self, data: f64) {
+        self.inner.data.set(data);
     }
 
     pub fn grad(&self) -> f64 {
@@ -87,15 +91,15 @@ impl Value {
     pub fn backward(&self) {
         let mut topo = vec![];
         let mut visited = HashSet::new();
-    
+
         self.build_topo(&mut visited, &mut topo);
-    
+
         for value in &topo {
             value.set_grad(0.0);
         }
-    
+
         self.set_grad(1.0);
-    
+
         for value in topo.into_iter().rev() {
             value._backward();
         }
@@ -137,7 +141,6 @@ impl Value {
             }
         }
     }
-
 }
 
 impl Add for Value {
@@ -163,7 +166,15 @@ impl Neg for Value {
     type Output = Value;
 
     fn neg(self) -> Self::Output {
-       self * Value::new(-1.0)
+        self * Value::new(-1.0)
+    }
+}
+
+impl Sub for Value {
+    type Output = Value;
+
+    fn sub(self, rhs: Value) -> Self::Output {
+        self + (-rhs)
     }
 }
 
@@ -199,8 +210,8 @@ pub struct Neuron {
 impl Neuron {
     pub fn new(input_count: usize, seed: usize, nonlin: bool) -> Self {
         let weights = (0..input_count)
-        .map(|i| Value::new(seeded_weight(seed + i)))
-        .collect();
+            .map(|i| Value::new(seeded_weight(seed + i)))
+            .collect();
 
         let bias = Value::new(0.0);
 
@@ -225,19 +236,138 @@ impl Neuron {
             out = out + input.clone() * weight.clone();
         }
 
-        if self.nonlin {
-            out.relu()
-        } else {
-            out
+        if self.nonlin { out.relu() } else { out }
+    }
+
+    pub fn parameters(&self) -> Vec<Value> {
+        let mut params = self.weights.clone();
+        params.push(self.bias.clone());
+        params
+    }
+}
+
+pub struct Layer {
+    neurons: Vec<Neuron>,
+}
+
+impl Layer {
+    pub fn new(input_count: usize, output_count: usize, seed: usize, nonlin: bool) -> Self {
+        let neurons = (0..output_count)
+            .map(|i| Neuron::new(input_count, seed + i * (input_count + 1), nonlin))
+            .collect();
+        Self { neurons }
+    }
+
+    pub fn forward(&self, inputs: &[Value]) -> Vec<Value> {
+        self.neurons
+            .iter()
+            .map(|neuron| neuron.forward(inputs))
+            .collect()
+    }
+
+    pub fn parameters(&self) -> Vec<Value> {
+        self.neurons
+            .iter()
+            .flat_map(|neuron| neuron.parameters())
+            .collect()
+    }
+}
+
+pub struct MLP {
+    layers: Vec<Layer>,
+}
+
+impl MLP {
+    pub fn new(input_count: usize, output_sizes: &[usize]) -> Self {
+        assert!(!output_sizes.is_empty(), "output_sizes must be non-empty");
+
+        let layer_count = output_sizes.len();
+        let mut seed = 0;
+        let mut in_size = input_count;
+
+        let layers = output_sizes
+            .iter()
+            .enumerate()
+            .map(|(i, &out_size)| {
+                let layer = Layer::new(in_size, out_size, seed, i + 1 < layer_count);
+                seed += out_size * (in_size + 1);
+                in_size = out_size;
+                layer
+            })
+            .collect();
+
+        Self { layers }
+    }
+
+    pub fn forward(&self, inputs: &[Value]) -> Vec<Value> {
+        let mut out = inputs.to_vec();
+
+        for layer in &self.layers {
+            out = layer.forward(&out);
         }
+
+        out
+    }
+
+    pub fn parameters(&self) -> Vec<Value> {
+        self.layers
+            .iter()
+            .flat_map(|layer| layer.parameters())
+            .collect()
+    }
+
+    pub fn zero_grad(&self) {
+        for parameter in self.parameters() {
+            parameter.set_grad(0.0);
+        }
+    }
+
+    pub fn train_step(&self, inputs: &[&[Value]], targets: &[&[Value]], learning_rate: f64) -> f64 {
+        assert_eq!(
+            inputs.len(),
+            targets.len(),
+            "number of inputs must match number of targets"
+        );
+        assert!(!inputs.is_empty(), "training batch must be non-empty");
+
+        self.zero_grad();
+
+        let mut loss = Value::new(0.0);
+
+        for (input, target) in inputs.iter().zip(targets.iter()) {
+            let outputs = self.forward(input);
+
+            for (output, target) in outputs.iter().zip(target.iter()) {
+                let diff = output.clone() - target.clone();
+                loss = loss + diff.clone() * diff;
+            }
+        }
+
+        loss = loss * Value::new(1.0 / inputs.len() as f64);
+        loss.backward();
+
+        for param in self.parameters() {
+            param.set_data(param.data() - learning_rate * param.grad());
+        }
+
+        loss.data()
+    }
+
+    pub fn train(
+        &self,
+        inputs: &[&[Value]],
+        targets: &[&[Value]],
+        learning_rate: f64,
+        epochs: usize,
+    ) -> Vec<f64> {
+        (0..epochs)
+            .map(|_| self.train_step(inputs, targets, learning_rate))
+            .collect()
     }
 }
 
 fn seeded_weight(seed: usize) -> f64 {
-    let value = seed
-        .wrapping_mul(1_664_525)
-        .wrapping_add(1_013_904_223)
-        % 10_000;
+    let value = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223) % 10_000;
 
     let normalized = value as f64 / 10_000.0;
 
@@ -270,7 +400,7 @@ mod tests {
         let c = a + b;
         assert_eq!(c.data(), 3.0);
     }
-    
+
     #[test]
     fn test_mul() {
         let a = Value::new(1.0);
@@ -283,9 +413,7 @@ mod tests {
     fn polynomial_backward() {
         let x = Value::new(3.0);
 
-        let y = x.clone() * x.clone()
-            + Value::new(2.0) * x.clone()
-            + Value::new(1.0);
+        let y = x.clone() * x.clone() + Value::new(2.0) * x.clone() + Value::new(1.0);
 
         y.backward();
 
@@ -295,5 +423,27 @@ mod tests {
         // dy/dx = 2x + 2
         // at x = 3, dy/dx = 8
         assert_eq!(x.grad(), 8.0);
+    }
+
+    #[test]
+    fn train_step_returns_loss_for_one_parameter_update() {
+        let mlp = MLP::new(1, &[1]);
+        let input = [Value::new(1.0)];
+        let target = [Value::new(0.0)];
+
+        let loss = mlp.train_step(&[&input], &[&target], 0.01);
+
+        assert!(loss >= 0.0);
+    }
+
+    #[test]
+    fn train_runs_for_each_epoch_and_returns_losses() {
+        let mlp = MLP::new(1, &[1]);
+        let input = [Value::new(1.0)];
+        let target = [Value::new(0.0)];
+
+        let losses = mlp.train(&[&input], &[&target], 0.01, 3);
+
+        assert_eq!(losses.len(), 3);
     }
 }
